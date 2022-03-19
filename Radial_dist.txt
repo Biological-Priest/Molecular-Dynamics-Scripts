@@ -1,0 +1,174 @@
+import re
+import os.path
+import numpy as np
+import pandas as pd
+from io import StringIO
+import matplotlib.pyplot as plt
+import concurrent.futures
+import more_itertools
+
+def getFileList(dirName):
+    listOfFiles = list()
+
+    for (dirpath, dirnames, filenames) in os.walk(dirName):
+        listOfFiles += [os.path.join(dirpath, file) for file in filenames]
+    return listOfFiles
+
+def getNumFolders(dirName):
+    a = os.listdir(dirName)
+    return a.__len__()
+
+def getBox(dirName):
+    file = open(dirName, "r")
+    for line in file:
+        if re.search("     Box", line):
+            part = re.split(r'\s+',line)
+            X = part[4].strip()
+            Y = part[8].strip()
+            Z = part[12].strip()
+            return X ,Y, Z
+
+def getNRES(dirName):
+
+    file = open(dirName, "r")
+
+    for line in file:
+
+        if re.search("NRES", line):
+
+            pr = line.split("=")
+            pr = pr[-1].strip()
+            return pr
+
+def getxMaxValue(R1Data):
+
+    xMax = 0
+    xMin = 0
+    xMax = R1Data["dist"].max()
+
+    return xMin, xMax
+
+def readFile(fileList):
+    dat = []
+    for file in fileList:
+        with open(file) as f:
+            print(f)
+            dat.append(f.read())
+    return dat
+
+def mergeFiles(listOfFiles):
+    lines = []
+    print("0. start")
+
+    # Parrallel File Reading
+    with concurrent.futures.ProcessPoolExecutor(12) as executor:
+        gf = more_itertools.grouper(3, listOfFiles)
+        futures = [executor.submit(readFile, listF) for listF in gf]
+        concurrent.futures.wait(futures)
+    for dat in futures:
+        if dat._result is not None:
+            temp = []
+            temp.append(''.join(dat._result[0:-1]))
+            lines.append(temp[0])
+
+    print("0. end")
+
+    print("1. Start")
+    list1 = ''.join(lines[0:-1])
+    print("1. End")
+
+    print("2. start")
+    s = re.sub(r'(?m)^\#Frame.*\n?', '', list1)
+    print("2. end")
+
+    print("3. start")
+    data = StringIO(s)
+    print("3. end")
+
+    print("4. start")
+    pdOut = pd.read_csv(data, delimiter='\s+')
+    print("4. end")
+
+    print("5. start")
+    pdOut.columns = ["Frame #", "dist"]
+    print("5.end")
+
+    return pdOut
+
+def dataHist(xMin,xMax,dr,distList):
+    bins = int((xMax-xMin)/dr)
+
+    frequency , xCoord = np.histogram(distList,bins,range=(xMin,xMax))
+    return frequency, xCoord
+
+def mysteriousAlgorithm(numMolecules,vol,frequency,xCoord,numElements,dr,Na):
+    rho = numMolecules/vol
+    r = xCoord[:-1] + dr/2
+    val = frequency / (4*np.pi*r**2*dr)/ (Na*rho) / numElements
+
+    xx = pd.DataFrame(r)
+    xx.columns = ["r"]
+
+    yy = pd.DataFrame(val)
+    yy.columns = ["gr"]
+
+    d4 = pd.concat([xx,yy], axis = 1)
+    return d4
+
+
+def main():
+    # Directories of Interest
+    dirName = "/pscratch/cpriest/rdf/back/Allr/r1"
+    fileNVT = "/pscratch/cpriest/rdf/back/NVT.out"
+    allRFiles = "/pscratch/cpriest/rdf/back/Allr"
+
+    # Generate R#-file list for all directories and count the files
+    print("1. Getting List of files to process")
+    listOfRFiles = getFileList(allRFiles)
+    numOfFiles = len(listOfRFiles)
+    Na = getNumFolders(allRFiles)
+
+    # Get box diminsions and number of molecules from the NVT.out file.
+    print("2. Gettting Volume and Number of Molecules")
+    boxDim = getBox(fileNVT)
+    numMolecules = getNRES(fileNVT)
+    vol = float(boxDim[0])*float(boxDim[1])*float(boxDim[2])
+
+    # Get the max X value from all of the R1 files.
+    print("3. Getting Max X-Coordinate value")
+    R1Files = getFileList(dirName)
+    R1Data = mergeFiles(R1Files)
+    xMinMax = getxMaxValue(R1Data)
+
+    # Get distances from R1 directory
+    print("4. Generating list of distances by combining all R-Files.")
+    distList = mergeFiles(listOfRFiles)
+    numElements = len(distList["dist"])/numOfFiles
+
+    #Histogram
+
+    print("5. Binning data")
+    dr = 0.1
+    resultHist = dataHist(xMinMax[0], xMinMax[1], dr, distList["dist"])
+
+    #CALCULATE stuff
+    #numMolecules = 537
+    #Na = 50
+    print("6. Calculating GoR")
+    resultD4 =  mysteriousAlgorithm(int(numMolecules), vol, resultHist[0], resultHist[1], numElements,dr,Na)
+
+    # Save
+    print("7. Saving file")
+    np.savetxt(allRFiles+'p.txt', resultD4)
+
+    #Plot
+    print("8. Plotting")
+    plt.plot(resultD4["r"],resultD4["gr"])
+    plt.xlim(2,10)
+    plt.ylim(0,5)
+    plt.show()
+
+    # Debug print statements
+    print("Done")
+if __name__ == "__main__":
+    main()
